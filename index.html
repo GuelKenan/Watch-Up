@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Watch Up</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">WU</div>
+          <div>
+            <h1>Watch Up</h1>
+            <p>Film- und Serien-Tracker</p>
+          </div>
+        </div>
+        <nav class="nav">
+          <button class="active" data-view="library">Sammlung</button>
+          <button data-view="discover">Entdecken</button>
+          <button data-view="stats">Statistik</button>
+          <button data-view="calendar">Kalender</button>
+          <button data-view="backup">Backup</button>
+        </nav>
+        <section class="level-card">
+          <span>Watch Level</span>
+          <strong id="watchLevel">Gelegenheitsgucker</strong>
+          <div class="meter"><i id="levelMeter"></i></div>
+          <small id="levelHint">0 Minuten getrackt</small>
+        </section>
+      </aside>
+
+      <main>
+        <header class="topbar">
+          <div>
+            <h2 id="pageTitle">Sammlung</h2>
+            <p id="pageSubline">Tracke Filme, Serien, Episoden und deinen Geschmack.</p>
+          </div>
+          <button class="primary" id="addTitleBtn">+ Titel</button>
+        </header>
+
+        <section class="view active" id="libraryView">
+          <div class="tools">
+            <input id="searchInput" type="search" placeholder="Titel, Genre, Mood suchen" />
+            <div class="segments">
+              <button class="active" data-kind="all">Alle</button>
+              <button data-kind="movie">Filme</button>
+              <button data-kind="series">Serien</button>
+            </div>
+          </div>
+          <div class="chips" id="statusChips"></div>
+          <div class="grid" id="titleGrid"></div>
+          <div class="empty" id="emptyState">
+            <h3>Noch keine Titel</h3>
+            <p>Füge deinen ersten Film oder deine erste Serie hinzu. Alles bleibt lokal in diesem Browser gespeichert.</p>
+          </div>
+        </section>
+
+        <section class="view" id="discoverView">
+          <div class="discover-tools">
+            <div class="segments" id="swipeMode">
+              <button class="active" data-swipe-mode="unwatched">Ungesehen</button>
+              <button data-swipe-mode="rewatch">Rewatch</button>
+              <button data-swipe-mode="new">Neue Vorschläge</button>
+            </div>
+            <button class="secondary" id="refreshSuggestionsBtn">Neue Vorschläge laden</button>
+          </div>
+          <div class="chips genre-seeds" id="genreSeeds">
+            <button class="chip active" data-seed="mix">Genre-Mix</button>
+            <button class="chip" data-seed="action">Action</button>
+            <button class="chip" data-seed="comedy">Comedy</button>
+            <button class="chip" data-seed="drama">Drama</button>
+            <button class="chip" data-seed="thriller">Thriller</button>
+            <button class="chip" data-seed="horror">Horror</button>
+            <button class="chip" data-seed="scifi">Sci-Fi</button>
+            <button class="chip" data-seed="fantasy">Fantasy</button>
+            <button class="chip" data-seed="romance">Romance</button>
+            <button class="chip" data-seed="anime">Anime</button>
+          </div>
+          <div class="discover-layout">
+            <section class="swipe-stage">
+              <div id="swipeDeck" class="swipe-deck"></div>
+              <div class="swipe-actions">
+                <button class="danger" id="swipeNoBtn">Nein</button>
+                <button class="secondary" id="swipeMaybeBtn">Vielleicht</button>
+                <button class="primary" id="swipeYesBtn">Ja</button>
+              </div>
+              <p class="muted" id="swipeHint">Wähle einen Modus aus und swipe dich durch deine Titel.</p>
+            </section>
+            <section class="panel">
+              <h3>Warum vorgeschlagen?</h3>
+              <div class="list" id="recommendationList"></div>
+            </section>
+          </div>
+          <section class="panel saved-suggestions-panel">
+            <h3>Swipe-Auswahl</h3>
+            <div class="list" id="savedSuggestionList"></div>
+          </section>
+        </section>
+
+        <section class="view" id="statsView">
+          <div class="stats-grid">
+            <article><span>Minuten</span><strong id="statMinutes">0</strong></article>
+            <article><span>Filme</span><strong id="statMovies">0</strong></article>
+            <article><span>Episoden</span><strong id="statEpisodes">0</strong></article>
+            <article><span>Ø Rating</span><strong id="statAverage">-</strong></article>
+          </div>
+          <div class="columns">
+            <section class="panel">
+              <h3>Top Bewertungen</h3>
+              <div class="list" id="topRated"></div>
+            </section>
+            <section class="panel">
+              <h3>Genres & Moods</h3>
+              <div class="tag-cloud" id="tagStats"></div>
+            </section>
+          </div>
+          <div class="columns">
+            <section class="panel">
+              <h3>Beste Episoden</h3>
+              <div class="list" id="topEpisodes"></div>
+            </section>
+            <section class="panel">
+              <h3>Stärkster Monat</h3>
+              <div class="list" id="monthlyStats"></div>
+            </section>
+          </div>
+          <section class="panel">
+            <h3>Letzter Verlauf</h3>
+            <div class="list" id="watchHistory"></div>
+          </section>
+          <section class="panel wrapped">
+            <h3>Watch Wrapped Basis</h3>
+            <div id="wrappedText"></div>
+          </section>
+        </section>
+
+        <section class="view" id="calendarView">
+          <section class="panel">
+            <h3>Nächste Episoden</h3>
+            <div class="list" id="calendarList"></div>
+          </section>
+        </section>
+
+        <section class="view" id="backupView">
+          <div class="columns">
+            <section class="panel">
+              <h3>Backup erstellen</h3>
+              <p>Exportiere deine Sammlung als JSON-Datei.</p>
+              <button class="secondary" id="exportBtn">Export</button>
+            </section>
+            <section class="panel">
+              <h3>Backup importieren</h3>
+              <p>Import ersetzt deine aktuelle Sammlung.</p>
+              <label class="file-btn">
+                JSON auswählen
+                <input id="importInput" type="file" accept="application/json" />
+              </label>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="titleDialog">
+      <form id="titleForm" method="dialog">
+        <div class="dialog-head">
+          <h3 id="dialogHeading">Titel hinzufügen</h3>
+          <button type="button" class="icon" id="closeDialog">×</button>
+        </div>
+        <h4 class="form-section-title">Basisdaten</h4>
+        <input type="hidden" id="editId" />
+        <div class="form-grid">
+          <label class="title-field">Titel
+            <input id="titleInput" required />
+            <span id="titleSearchNote">Tippe einen Titel ein.</span>
+            <span class="suggestions" id="titleSuggestions"></span>
+          </label>
+          <label>Typ<select id="typeInput"><option value="movie">Film</option><option value="series">Serie</option></select></label>
+          <label>Status<select id="statusInput"></select></label>
+          <label>Erscheinungsjahr / Serienstart
+            <input id="yearInput" type="number" min="1880" max="2100" />
+            <small>Hilft beim Unterscheiden von Remakes, Anime, Live Action und gleichnamigen Titeln.</small>
+          </label>
+          <label>Laufzeit in Minuten<input id="runtimeInput" type="number" min="1" /></label>
+          <label>Dein Rating<input id="ratingInput" type="number" min="0" max="10" step="0.5" placeholder="0-10" /></label>
+          <label>Gesehen am<input id="watchedAtInput" type="date" /></label>
+          <label>Rewatchs<input id="rewatchCountInput" type="number" min="0" value="0" /></label>
+          <label>Genres<input id="genresInput" placeholder="Drama, Sci-Fi" /></label>
+          <label>Besetzung<input id="castInput" placeholder="Name, Name" /></label>
+          <label>Mood-Tags<input id="moodsInput" placeholder="comfort, spannend" /></label>
+          <label>Externes Rating<input id="externalRatingInput" placeholder="TMDb 8.2, IMDb 7.9" /></label>
+          <label>Poster URL<input id="posterInput" type="url" /></label>
+        </div>
+        <h4 class="form-section-title">Notizen</h4>
+        <label>Beschreibung<textarea id="descriptionInput" rows="3"></textarea></label>
+        <label>Kommentar<textarea id="commentInput" rows="3"></textarea></label>
+
+        <section class="series-box" id="seriesBox">
+          <h4 class="form-section-title">Serienfortschritt</h4>
+          <div class="import-line">
+            <button class="secondary" type="button" id="importSeriesBtn">Serienvorschläge suchen</button>
+            <span id="importNote"></span>
+          </div>
+          <button class="secondary" type="button" id="enrichEpisodesBtn">Fehlende Episodennamen ergänzen</button>
+          <div class="loader-note" id="episodeLoader" hidden>
+            <span></span>
+            <strong id="episodeLoaderText">Lädt...</strong>
+          </div>
+          <div class="suggestions" id="seriesSuggestions"></div>
+          <div class="episodes" id="episodeEditor"></div>
+        </section>
+
+        <div class="dialog-actions">
+          <button type="button" class="danger" id="deleteBtn">Löschen</button>
+          <span></span>
+          <button type="button" class="secondary" id="cancelBtn">Abbrechen</button>
+          <button class="primary" type="submit">Speichern</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
