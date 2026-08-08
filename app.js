@@ -1,6 +1,8 @@
 const DB_NAME = "watch-up-db";
 const STORE = "titles";
 const SUGGESTION_STORE = "suggestions";
+const TMDB_KEY = "watch-up-tmdb-key";
+const TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w780";
 const statuses = [
   "Will ich sehen",
   "Schaue ich gerade",
@@ -20,7 +22,8 @@ const state = {
   swipeIndex: 0,
   newSuggestions: [],
   savedSuggestions: [],
-  discoverySeed: "mix"
+  discoverySeed: "mix",
+  calendarDate: new Date()
 };
 
 const titleSuggestionCache = new Map();
@@ -96,6 +99,24 @@ function deleteTitle(id) {
   });
 }
 
+async function deleteTitleEverywhere(id) {
+  const title = state.titles.find((item) => item.id === id);
+  if (title) {
+    title.includeInCalendar = false;
+    title.plannedAt = "";
+    title.releaseDate = "";
+    (title.episodes || []).forEach((episode) => {
+      episode.plannedAt = "";
+    });
+  }
+  if ($("#planTitleSelect")?.value === id) {
+    $("#planTitleSelect").value = "";
+    $("#planEpisodeSelect").innerHTML = `<option value="">-</option>`;
+    $("#planDateInput").value = "";
+  }
+  await deleteTitle(id);
+}
+
 function deleteSuggestion(id) {
   return new Promise((resolve, reject) => {
     const request = transaction("readwrite", SUGGESTION_STORE).delete(id);
@@ -106,7 +127,7 @@ function deleteSuggestion(id) {
 
 async function refresh() {
   state.titles = await getAllTitles();
-  state.savedSuggestions = await getAllSavedSuggestions();
+  state.savedSuggestions = dedupeMedia(await getAllSavedSuggestions());
   renderLibrary();
   renderStats();
   renderCalendar();
@@ -136,6 +157,67 @@ function titleInitials(title = "") {
   return (initials || "WU").toUpperCase();
 }
 
+function normalizeTitleKey(title = "") {
+  return String(title)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/&/g, " and ")
+    .replace(/\b(film|movie|the movie|der film|die serie|series|tv series)\b/g, " ")
+    .replace(/[^a-z0-9äöüß]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function mediaYear(item = {}) {
+  const year = String(item.year || item.raw?.year || item.rawSuggestion?.year || "").match(/\b(19|20)\d{2}\b/)?.[0] || "";
+  return year;
+}
+
+function mediaIdentity(item = {}) {
+  const type = item.type || item.raw?.type || "movie";
+  const title = item.title || item.raw?.title || "";
+  const year = mediaYear(item);
+  return `${type}:${normalizeTitleKey(title)}:${year}`;
+}
+
+function isSameMedia(a = {}, b = {}) {
+  const aType = a.type || a.raw?.type || "movie";
+  const bType = b.type || b.raw?.type || "movie";
+  if (aType !== bType) return false;
+  if (normalizeTitleKey(a.title || a.raw?.title) !== normalizeTitleKey(b.title || b.raw?.title)) return false;
+  const aYear = mediaYear(a);
+  const bYear = mediaYear(b);
+  return !aYear || !bYear || aYear === bYear;
+}
+
+function suggestionQuality(item = {}) {
+  const sourceScore = { tmdb: 6, jikan: 5, tvmaze: 5, wikidata: 4, itunes: 3, new: 2 };
+  return (item.poster || item.image ? 20 : 0)
+    + (item.description || item.raw?.description || item.rawSuggestion?.description ? 4 : 0)
+    + (item.year || item.raw?.year || item.rawSuggestion?.year ? 2 : 0)
+    + (sourceScore[item.source] || 0);
+}
+
+function dedupeMedia(items = []) {
+  const unique = [];
+  items.forEach((item) => {
+    const duplicateIndex = unique.findIndex((candidate) => isSameMedia(candidate, item));
+    if (duplicateIndex === -1) {
+      unique.push(item);
+      return;
+    }
+    if (suggestionQuality(item) > suggestionQuality(unique[duplicateIndex])) {
+      unique[duplicateIndex] = item;
+    }
+  });
+  return unique;
+}
+
+function hasMediaInList(list = [], item = {}) {
+  return list.some((candidate) => isSameMedia(candidate, item));
+}
+
 function getWatchedEpisodes(title) {
   return (title.episodes || []).filter((episode) => episode.seen);
 }
@@ -154,11 +236,46 @@ function getMinutes(title) {
     + getTitleRewatchCount(title) * (title.episodes || []).reduce((sum, episode) => sum + Number(episode.runtime || title.runtime || 0), 0);
 }
 
+function getMovieMinutes() {
+  return state.titles
+    .filter((title) => title.type === "movie")
+    .reduce((sum, title) => sum + getMinutes(title), 0);
+}
+
+function getSeriesMinutes() {
+  return state.titles
+    .filter((title) => title.type === "series")
+    .reduce((sum, title) => sum + getMinutes(title), 0);
+}
+
 function monthLabel(dateValue) {
   if (!dateValue) return "ohne Datum";
   const date = new Date(dateValue);
   if (Number.isNaN(date.getTime())) return "ohne Datum";
   return date.toLocaleDateString("de-DE", { month: "long", year: "numeric" });
+}
+
+function todayIso() {
+  return toIsoDate(new Date());
+}
+
+function addDays(date, days) {
+  const result = new Date(date);
+  result.setDate(result.getDate() + days);
+  return result;
+}
+
+function toIsoDate(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function parseIsoDate(value) {
+  if (!value) return null;
+  const date = new Date(`${value}T00:00:00`);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 function getWatchEvents() {
@@ -191,6 +308,16 @@ function getWatchEvents() {
 function isWatchedTitle(title) {
   if (title.type === "movie") return title.status === "Abgeschlossen" || title.status === "Rewatch" || Boolean(title.watchedAt);
   return getWatchedEpisodes(title).length > 0 || title.status === "Abgeschlossen" || title.status === "Rewatch";
+}
+
+function isAnimeTitle(title = {}) {
+  const haystack = [
+    title.title,
+    title.source,
+    ...(title.genres || []),
+    ...(title.moods || [])
+  ].join(" ").toLowerCase();
+  return haystack.includes("anime") || haystack.includes("myanimelist") || title.malId;
 }
 
 function normalizeWords(value = "") {
@@ -276,8 +403,9 @@ function renderSwipe() {
     return;
   }
 
-  const poster = current.poster
-    ? `<div class="swipe-poster"><img src="${current.poster}" alt=""></div>`
+  const currentPoster = safeImageUrl(current.poster);
+  const poster = currentPoster
+    ? `<div class="swipe-poster"><img src="${escapeHtml(currentPoster)}" alt="" referrerpolicy="no-referrer"></div>`
     : `<div class="swipe-poster poster-placeholder"><span>${current.type === "movie" ? "Film" : "Serie"}</span><strong>${escapeHtml(titleInitials(current.title))}</strong></div>`;
   $("#swipeDeck").innerHTML = `
     <article class="swipe-card">
@@ -367,7 +495,7 @@ function curatedSuggestionsForSeed(seed, existingTitles) {
   const wantedLower = wanted.map((item) => item.toLowerCase().replace("science fiction", "sci-fi"));
   return curatedDiscoverPool
     .filter((item) => seed === "mix" || item.genres.some((genre) => wantedLower.includes(genre.toLowerCase())))
-    .filter((item) => !existingTitles.has(item.title.toLowerCase()))
+    .filter((item) => !hasMediaInList(existingTitles, item))
     .map((item) => ({
       id: `curated-${item.type}-${item.title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
       source: "new",
@@ -381,6 +509,19 @@ function curatedSuggestionsForSeed(seed, existingTitles) {
       description: "",
       reasons: [`kuratierter ${seed === "mix" ? "Genre-Mix" : "Vorschlag"} · ${item.genres.slice(0, 2).join(", ")}`]
     }));
+}
+
+async function enrichSuggestionImages(suggestions) {
+  const enriched = await Promise.all(suggestions.slice(0, 20).map(async (suggestion) => {
+    if (suggestion.poster) return suggestion;
+    const details = await fetchWikipediaDetails(suggestion.title, suggestion.type).catch(() => ({ image: "", extract: "" }));
+    return {
+      ...suggestion,
+      poster: details.image || suggestion.poster || "",
+      description: suggestion.description || details.extract || ""
+    };
+  }));
+  return [...enriched, ...suggestions.slice(20)];
 }
 
 async function searchItunesMovies(query) {
@@ -424,22 +565,23 @@ async function loadNewSuggestions() {
   const seriesSeeds = state.discoverySeed === "mix"
     ? [...baseSeeds.slice(0, 5), ...profile.genres.slice(0, 2)]
     : baseSeeds;
-  const existingTitles = new Set(state.titles.map((title) => title.title.toLowerCase()));
-  state.savedSuggestions.forEach((suggestion) => existingTitles.add(suggestion.title.toLowerCase()));
+  const existingTitles = [...state.titles, ...state.savedSuggestions];
   const suggestions = curatedSuggestionsForSeed(state.discoverySeed, existingTitles);
   $("#swipeHint").textContent = "Neue Vorschläge werden gesucht...";
 
   for (const seed of movieSeeds.length ? movieSeeds : discoverySeedMap.mix) {
-    const [itunesMovies, wikidataMovies] = await Promise.allSettled([
+    const [tmdbMovies, itunesMovies, wikidataMovies] = await Promise.allSettled([
+      searchTmdbDiscover(seed, "movie"),
       searchItunesMovies(seed),
       searchWikidataMovies(seed)
     ]);
     const movies = [
+      ...(tmdbMovies.status === "fulfilled" ? tmdbMovies.value : []),
       ...(itunesMovies.status === "fulfilled" ? itunesMovies.value : []),
       ...(wikidataMovies.status === "fulfilled" ? wikidataMovies.value : [])
     ];
     movies.forEach((movie) => {
-      if (existingTitles.has(movie.title.toLowerCase())) return;
+      if (hasMediaInList([...existingTitles, ...suggestions], movie)) return;
       suggestions.push({
         id: `suggestion-${movie.source}-${movie.id}`,
         source: "new",
@@ -449,6 +591,7 @@ async function loadNewSuggestions() {
         genres: movie.genres || ["Film"],
         cast: movie.cast || [],
         moods: movie.moods || [],
+        externalRating: movie.externalRating || movie.raw?.rating || "",
         poster: movie.poster || "",
         description: movie.description || movie.raw?.description || "",
         reasons: movie.reasons || [`neuer Filmvorschlag aus ${seed}`],
@@ -458,11 +601,22 @@ async function loadNewSuggestions() {
   }
 
   for (const seed of seriesSeeds.length ? seriesSeeds : discoverySeedMap.mix) {
+    const tmdbSeries = await searchTmdbDiscover(seed, "series").catch(() => []);
+    tmdbSeries.forEach((show) => {
+      if (hasMediaInList([...existingTitles, ...suggestions], show)) return;
+      suggestions.push(show);
+    });
+
     const seriesResponse = await fetch(`https://api.tvmaze.com/search/shows?q=${encodeURIComponent(seed)}`).catch(() => null);
     if (seriesResponse?.ok) {
       const data = await seriesResponse.json();
       data.slice(0, 4).forEach(({ show }) => {
-        if (existingTitles.has(show.name.toLowerCase())) return;
+        const candidate = {
+          type: "series",
+          title: show.name,
+          year: show.premiered ? show.premiered.slice(0, 4) : ""
+        };
+        if (hasMediaInList([...existingTitles, ...suggestions], candidate)) return;
         suggestions.push({
           id: `suggestion-tvmaze-${show.id}`,
           source: "new",
@@ -481,35 +635,43 @@ async function loadNewSuggestions() {
     }
   }
 
-  const unique = [];
-  const seen = new Set();
-  suggestions.forEach((suggestion) => {
-    const key = suggestion.title.toLowerCase();
-    if (seen.has(key)) return;
-    seen.add(key);
-    unique.push(suggestion);
-  });
-  state.newSuggestions = unique.slice(0, 20);
+  const unique = dedupeMedia(suggestions);
+  state.newSuggestions = (await enrichSuggestionImages(unique)).slice(0, 20);
   state.swipeMode = "new";
   state.swipeIndex = 0;
   $$("#swipeMode button").forEach((button) => button.classList.toggle("active", button.dataset.swipeMode === "new"));
   renderSwipe();
 }
 
-function getLevel(minutes) {
-  const levels = [
-    ["Gelegenheitsgucker", 600],
-    ["Serien-Snacker", 1800],
-    ["Prime-Time-Profi", 4500],
-    ["Binge-Buddy", 9000],
-    ["Watchjunkie", 18000],
-    ["Cineast", 36000],
-    ["Watch-Legende", 72000]
-  ];
+function getLevel(minutes, levels) {
   const current = levels.find(([_, limit]) => minutes < limit) || levels[levels.length - 1];
   const previousLimit = levels[Math.max(0, levels.indexOf(current) - 1)]?.[1] || 0;
   const progress = Math.min(100, ((minutes - previousLimit) / (current[1] - previousLimit)) * 100);
   return { name: current[0], next: current[1], progress: Number.isFinite(progress) ? progress : 100 };
+}
+
+function getMovieLevel(minutes) {
+  return getLevel(minutes, [
+    ["Film-Starter", 360],
+    ["Popcorn-Profi", 720],
+    ["Couch-Cineast", 1500],
+    ["Movie-Marathoner", 3000],
+    ["Blockbuster-Jäger", 6000],
+    ["Filmjunkie", 12000],
+    ["Kino-Legende", 24000]
+  ]);
+}
+
+function getSeriesLevel(minutes) {
+  return getLevel(minutes, [
+    ["Serien-Starter", 600],
+    ["Folgen-Sammler", 1800],
+    ["Staffel-Profi", 4500],
+    ["Binge-Buddy", 9000],
+    ["Serienjunkie", 18000],
+    ["Showrunner", 36000],
+    ["Serien-Legende", 72000]
+  ]);
 }
 
 function filteredTitles() {
@@ -545,8 +707,9 @@ function renderLibrary() {
     const total = (title.episodes || []).length;
     const progress = title.type === "series" ? `<div class="meta">${watched}/${total} Episoden gesehen</div>` : "";
     const tags = [...(title.genres || []), ...(title.moods || [])].slice(0, 3);
-    const poster = title.poster
-      ? `<div class="poster"><img src="${title.poster}" alt=""></div>`
+    const titlePoster = safeImageUrl(title.poster);
+    const poster = titlePoster
+      ? `<div class="poster"><img src="${escapeHtml(titlePoster)}" alt="" referrerpolicy="no-referrer"></div>`
       : `<div class="poster poster-placeholder"><span>${title.type === "movie" ? "Film" : "Serie"}</span><strong>${escapeHtml(titleInitials(title.title))}</strong></div>`;
     return `
       <article class="title-card">
@@ -572,21 +735,27 @@ function renderLibrary() {
 }
 
 function renderStats() {
-  const minutes = state.titles.reduce((sum, title) => sum + getMinutes(title), 0);
+  const movieMinutes = getMovieMinutes();
+  const seriesMinutes = getSeriesMinutes();
+  const minutes = movieMinutes + seriesMinutes;
   const watchedMovies = state.titles.filter((title) => title.type === "movie" && (title.status === "Abgeschlossen" || title.status === "Rewatch" || title.watchedAt)).length;
   const watchedEpisodes = state.titles.reduce((sum, title) => sum + getWatchedEpisodes(title).length, 0);
   const ratings = state.titles.map((title) => title.rating).filter((rating) => rating !== null && rating !== undefined);
   const average = ratings.length ? (ratings.reduce((sum, rating) => sum + Number(rating), 0) / ratings.length).toFixed(1) : "-";
-  const level = getLevel(minutes);
+  const movieLevel = getMovieLevel(movieMinutes);
+  const seriesLevel = getSeriesLevel(seriesMinutes);
   const events = getWatchEvents();
 
   $("#statMinutes").textContent = minutes.toLocaleString("de-DE");
   $("#statMovies").textContent = watchedMovies;
   $("#statEpisodes").textContent = watchedEpisodes;
   $("#statAverage").textContent = average;
-  $("#watchLevel").textContent = level.name;
-  $("#levelMeter").style.width = `${level.progress}%`;
-  $("#levelHint").textContent = `${minutes.toLocaleString("de-DE")} Minuten getrackt`;
+  $("#movieWatchLevel").textContent = movieLevel.name;
+  $("#movieLevelMeter").style.width = `${movieLevel.progress}%`;
+  $("#movieLevelHint").textContent = `${movieMinutes.toLocaleString("de-DE")} Film-Minuten`;
+  $("#seriesWatchLevel").textContent = seriesLevel.name;
+  $("#seriesLevelMeter").style.width = `${seriesLevel.progress}%`;
+  $("#seriesLevelHint").textContent = `${seriesMinutes.toLocaleString("de-DE")} Serien-Minuten`;
 
   const top = [...state.titles]
     .filter((title) => title.rating !== null && title.rating !== undefined)
@@ -630,7 +799,9 @@ function renderStats() {
   const strongestMonth = months[0]?.[0] || "noch offen";
   const bestEpisode = topEpisodes[0] ? `${topEpisodes[0].title.title} S${topEpisodes[0].episode.season || 1} E${topEpisodes[0].episode.number || "?"}` : "noch offen";
   $("#wrappedText").innerHTML = `
-    <p>Du hast bisher <strong>${Math.round(minutes / 60).toLocaleString("de-DE")} Stunden</strong> gesammelt und bist aktuell <strong>${level.name}</strong>.</p>
+    <p>Du hast bisher <strong>${Math.round(minutes / 60).toLocaleString("de-DE")} Stunden</strong> gesammelt.</p>
+    <p>Film-Level: <strong>${escapeHtml(movieLevel.name)}</strong> mit <strong>${Math.round(movieMinutes / 60).toLocaleString("de-DE")} Film-Stunden</strong>.</p>
+    <p>Serien-Level: <strong>${escapeHtml(seriesLevel.name)}</strong> mit <strong>${Math.round(seriesMinutes / 60).toLocaleString("de-DE")} Serien-Stunden</strong>.</p>
     <p>Dein stärkstes Genre oder Mood ist gerade <strong>${escapeHtml(topGenre)}</strong>.</p>
     <p>Dein stärkster Monat ist <strong>${escapeHtml(strongestMonth)}</strong>.</p>
     <p>Deine beste Episode ist aktuell <strong>${escapeHtml(bestEpisode)}</strong>.</p>
@@ -638,17 +809,386 @@ function renderStats() {
 }
 
 function renderCalendar() {
-  const items = state.titles
-    .filter((title) => title.type === "series")
-    .map((title) => {
-      const next = normalizeEpisodesForEditor(title.episodes || []).find((episode) => !episode.seen);
-      return next ? { title, episode: next } : null;
-    })
-    .filter(Boolean)
-    .slice(0, 20);
-  $("#calendarList").innerHTML = items.length
-    ? items.map(({ title, episode }) => listItem(title.title, `S${episode.season} E${episode.number} · ${episode.name}`)).join("")
-    : emptyLine("Keine offenen Episoden");
+  const cursor = new Date(state.calendarDate.getFullYear(), state.calendarDate.getMonth(), 1);
+  const monthStart = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
+  const monthEnd = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0);
+  const gridStart = addDays(monthStart, -((monthStart.getDay() + 6) % 7));
+  const events = getCalendarEvents();
+  const eventMap = events.reduce((map, event) => {
+    map[event.date] ||= [];
+    map[event.date].push(event);
+    return map;
+  }, {});
+
+  $("#calendarMonthTitle").textContent = cursor.toLocaleDateString("de-DE", { month: "long", year: "numeric" });
+  $("#calendarMonthHint").textContent = "Release-Termine aus Serienepisoden und deine geplanten Watch-Termine.";
+
+  const today = todayIso();
+  const days = Array.from({ length: 42 }, (_, index) => addDays(gridStart, index));
+  $("#calendarGrid").innerHTML = days.map((day) => {
+    const iso = toIsoDate(day);
+    const dayEvents = eventMap[iso] || [];
+    const outside = day.getMonth() !== cursor.getMonth();
+    return `
+      <button type="button" class="calendar-day ${outside ? "outside" : ""} ${iso === today ? "today" : ""}" data-calendar-date="${iso}">
+        <span>${day.getDate()}</span>
+        <div>
+          ${dayEvents.slice(0, 3).map((event) => `<small class="${event.kind}">${escapeHtml(event.short)}</small>`).join("")}
+          ${dayEvents.length > 3 ? `<small>+${dayEvents.length - 3} mehr</small>` : ""}
+        </div>
+      </button>
+    `;
+  }).join("");
+
+  const weekEnd = toIsoDate(addDays(parseIsoDate(today), 7));
+  const upcoming = events
+    .filter((event) => event.date >= today && event.date <= weekEnd)
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .slice(0, 10);
+  $("#calendarList").innerHTML = upcoming.length
+    ? upcoming.map((event) => listItem(event.label, `${new Date(`${event.date}T00:00:00`).toLocaleDateString("de-DE")} · ${event.typeLabel}`)).join("")
+    : emptyLine("Diese Woche ist noch nichts geplant.");
+
+  renderPlanControls();
+  renderCalendarSelection();
+  renderNotificationStatus();
+  maybeSendCalendarNotifications(upcoming);
+}
+
+function isTitleCalendarIncluded(title) {
+  return Boolean(title.includeInCalendar || title.plannedAt || title.releaseDate || (title.episodes || []).some((episode) => episode.plannedAt));
+}
+
+function getCalendarEvents() {
+  const events = [];
+  state.titles.filter(isTitleCalendarIncluded).forEach((title) => {
+    if (title.type === "movie" && title.plannedAt) {
+      events.push({
+        id: `${title.id}:movie-plan`,
+        date: title.plannedAt,
+        kind: "planned",
+        short: "Film geplant",
+        label: title.title,
+        typeLabel: "geplant"
+      });
+    }
+
+    if (title.type === "movie" && title.releaseDate) {
+      events.push({
+        id: `${title.id}:movie-release`,
+        date: title.releaseDate,
+        kind: "release",
+        short: "Filmstart",
+        label: title.title,
+        typeLabel: "Release"
+      });
+    }
+
+    (title.episodes || []).forEach((episode) => {
+      const episodeLabel = `${title.title} · S${episode.season || 1} E${episode.number || "?"}`;
+      if (episode.airdate) {
+        events.push({
+          id: `${title.id}:${episode.id || episode.number}:release`,
+          date: episode.airdate,
+          kind: "release",
+          short: `E${episode.number || "?"} Release`,
+          label: `${episodeLabel} · ${episode.name || "Episode"}`,
+          typeLabel: "erscheint"
+        });
+      }
+      if (episode.plannedAt) {
+        events.push({
+          id: `${title.id}:${episode.id || episode.number}:planned`,
+          date: episode.plannedAt,
+          kind: "planned",
+          short: `E${episode.number || "?"} geplant`,
+          label: `${episodeLabel} · ${episode.name || "Episode"}`,
+          typeLabel: "geplant"
+        });
+      }
+    });
+  });
+
+  return events
+    .filter((event) => parseIsoDate(event.date))
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function renderPlanControls() {
+  const titleSelect = $("#planTitleSelect");
+  const episodeSelect = $("#planEpisodeSelect");
+  const dateInput = $("#planDateInput");
+  if (!titleSelect || !episodeSelect || !dateInput) return;
+
+  const selectedTitleId = titleSelect.value;
+  titleSelect.innerHTML = state.titles.length
+    ? state.titles.map((title) => `<option value="${title.id}">${escapeHtml(title.title)} · ${title.type === "movie" ? "Film" : "Serie"}</option>`).join("")
+    : `<option value="">Noch keine Titel</option>`;
+  if (selectedTitleId && state.titles.some((title) => title.id === selectedTitleId)) {
+    titleSelect.value = selectedTitleId;
+  } else if (state.titles[0]) {
+    titleSelect.value = state.titles[0].id;
+  }
+
+  const selectedTitle = state.titles.find((title) => title.id === titleSelect.value);
+  if (!selectedTitle) {
+    episodeSelect.innerHTML = `<option value="">-</option>`;
+    dateInput.value = "";
+    return;
+  }
+
+  if (selectedTitle.type === "movie") {
+    episodeSelect.innerHTML = `<option value="movie">Film schauen</option>`;
+    dateInput.value ||= selectedTitle.plannedAt || todayIso();
+    return;
+  }
+
+  const episodes = normalizeEpisodesForEditor(selectedTitle.episodes || []);
+  const openEpisodes = episodes.filter((episode) => !episode.seen);
+  const selectedEpisodeId = episodeSelect.value;
+  episodeSelect.innerHTML = openEpisodes.length
+    ? openEpisodes.map((episode) => `<option value="${episode.id || `${episode.season}-${episode.number}`}">S${episode.season} E${episode.number} · ${escapeHtml(episode.name || "Episode")}</option>`).join("")
+    : `<option value="">Keine offenen Folgen</option>`;
+  if (selectedEpisodeId && openEpisodes.some((episode) => String(episode.id || `${episode.season}-${episode.number}`) === selectedEpisodeId)) {
+    episodeSelect.value = selectedEpisodeId;
+  }
+  const selectedEpisode = openEpisodes.find((episode) => String(episode.id || `${episode.season}-${episode.number}`) === episodeSelect.value);
+  dateInput.value ||= selectedEpisode?.plannedAt || todayIso();
+}
+
+function renderCalendarSelection() {
+  const addSelect = $("#calendarAddSelect");
+  const list = $("#calendarIncludedList");
+  if (!addSelect || !list) return;
+  const available = state.titles.filter((title) => !isTitleCalendarIncluded(title));
+  const included = state.titles.filter(isTitleCalendarIncluded);
+  addSelect.innerHTML = available.length
+    ? available.map((title) => `<option value="${title.id}">${escapeHtml(title.title)} · ${title.type === "movie" ? "Film" : "Serie"}</option>`).join("")
+    : `<option value="">Alles ist schon im Kalender</option>`;
+  $("#addToCalendarBtn").disabled = !available.length;
+  list.innerHTML = included.length
+    ? included.map((title) => `
+      <div class="calendar-picked">
+        <div>
+          <strong>${escapeHtml(title.title)}</strong>
+          <span>${title.type === "movie" ? "Film" : "Serie"} · ${escapeHtml(title.year || "ohne Jahr")}</span>
+        </div>
+        <button class="danger" type="button" data-calendar-remove="${title.id}">Entfernen</button>
+      </div>
+    `).join("")
+    : emptyLine("Noch keine Titel im Kalender.");
+}
+
+async function addTitleToCalendar() {
+  const title = state.titles.find((item) => item.id === $("#calendarAddSelect").value);
+  if (!title) return;
+  title.includeInCalendar = true;
+  title.updatedAt = Date.now();
+  await saveTitle(sanitizeTitle(title));
+  await refresh();
+}
+
+async function removeTitleFromCalendar(id) {
+  const title = state.titles.find((item) => item.id === id);
+  if (!title) return;
+  title.includeInCalendar = false;
+  title.plannedAt = "";
+  title.releaseDate = "";
+  (title.episodes || []).forEach((episode) => {
+    episode.plannedAt = "";
+  });
+  title.updatedAt = Date.now();
+  await saveTitle(sanitizeTitle(title));
+  await refresh();
+}
+
+async function savePlannedWatch() {
+  const title = state.titles.find((item) => item.id === $("#planTitleSelect").value);
+  const date = $("#planDateInput").value;
+  if (!title || !parseIsoDate(date)) {
+    alert("Bitte Titel und Datum auswählen.");
+    return;
+  }
+
+  if (title.type === "movie") {
+    title.plannedAt = date;
+  } else {
+    const episodeId = $("#planEpisodeSelect").value;
+    const episode = (title.episodes || []).find((item) => String(item.id || `${item.season}-${item.number}`) === episodeId);
+    if (!episode) {
+      alert("Bitte eine offene Folge auswählen.");
+      return;
+    }
+    episode.plannedAt = date;
+  }
+  title.includeInCalendar = true;
+  title.updatedAt = Date.now();
+  await saveTitle(sanitizeTitle(title));
+  await refresh();
+}
+
+async function clearPlannedWatch() {
+  const title = state.titles.find((item) => item.id === $("#planTitleSelect").value);
+  if (!title) return;
+  if (title.type === "movie") {
+    title.plannedAt = "";
+  } else {
+    const episodeId = $("#planEpisodeSelect").value;
+    const episode = (title.episodes || []).find((item) => String(item.id || `${item.season}-${item.number}`) === episodeId);
+    if (episode) episode.plannedAt = "";
+  }
+  title.updatedAt = Date.now();
+  await saveTitle(sanitizeTitle(title));
+  await refresh();
+}
+
+async function fetchTvmazeShowWithEpisodes(title) {
+  if (title.externalId) {
+    const response = await fetch(`https://api.tvmaze.com/shows/${encodeURIComponent(title.externalId)}?embed=episodes`);
+    if (response.ok) {
+      const data = await response.json();
+      const expectedYear = mediaYear(title);
+      const actualYear = data.premiered ? data.premiered.slice(0, 4) : "";
+      if (!expectedYear || !actualYear || expectedYear === actualYear) return data;
+    }
+  }
+  const searchResponse = await fetch(`https://api.tvmaze.com/search/shows?q=${encodeURIComponent(title.title)}`);
+  if (!searchResponse.ok) return null;
+  const expectedKey = normalizeTitleKey(title.title);
+  const expectedYear = mediaYear(title);
+  const searchResults = await searchResponse.json();
+  const candidates = searchResults
+    .map(({ show }) => show)
+    .filter((show) => normalizeTitleKey(show.name) === expectedKey || normalizeTitleKey(show.name).includes(expectedKey) || expectedKey.includes(normalizeTitleKey(show.name)))
+    .slice(0, 4);
+  if (!candidates.length) return null;
+
+  const detailed = [];
+  for (const show of candidates) {
+    const response = await fetch(`https://api.tvmaze.com/shows/${show.id}?embed=episodes`);
+    if (!response.ok) continue;
+    detailed.push(await response.json());
+  }
+  if (!detailed.length) return null;
+
+  const yearMatch = expectedYear
+    ? detailed.find((show) => show.premiered?.slice(0, 4) === expectedYear)
+    : null;
+  if (yearMatch) return yearMatch;
+
+  return detailed.sort((a, b) => (b._embedded?.episodes?.length || 0) - (a._embedded?.episodes?.length || 0))[0];
+}
+
+function mergeEpisodes(existingEpisodes = [], remoteEpisodes = [], fallbackRuntime = 45, options = {}) {
+  const existing = normalizeEpisodesForEditor(existingEpisodes);
+  const byKey = new Map(existing.map((episode) => [`${episode.season}-${episode.number}`, episode]));
+  const merged = remoteEpisodes.map((episode) => {
+    const key = `${episode.season}-${episode.number}`;
+    const current = byKey.get(key) || {};
+    const remoteName = options.useGenericRemoteNames ? `Episode ${episode.number}` : episode.name;
+    const currentNameLooksTvmaze = String(current.id || "").startsWith("tvmaze-") && options.useGenericRemoteNames;
+    return {
+      ...current,
+      id: current.id || `tvmaze-${episode.id}`,
+      season: episode.season,
+      number: episode.number,
+      name: currentNameLooksTvmaze ? `Episode ${episode.number}` : (current.name || remoteName || `Episode ${episode.number}`),
+      runtime: current.runtime || episode.runtime || episode.averageRuntime || fallbackRuntime,
+      airdate: episode.airdate || current.airdate || "",
+      seen: Boolean(current.seen),
+      rating: current.rating ?? null,
+      watchedAt: current.watchedAt || "",
+      plannedAt: current.plannedAt || "",
+      comment: current.comment || ""
+    };
+  });
+  existing.forEach((episode) => {
+    const key = `${episode.season}-${episode.number}`;
+    if (!merged.some((item) => `${item.season}-${item.number}` === key)) merged.push(episode);
+  });
+  return normalizeEpisodesForEditor(merged).sort((a, b) => a.season - b.season || a.number - b.number);
+}
+
+async function refreshReleaseDates() {
+  const series = state.titles.filter((title) => title.type === "series");
+  if (!series.length) {
+    alert("Keine Serien zum Aktualisieren vorhanden.");
+    return;
+  }
+  $("#notifyStatus").textContent = "Release-Daten werden aktualisiert...";
+  let updated = 0;
+  let releaseCount = 0;
+  let nextReleaseDate = "";
+  for (const title of series) {
+    try {
+      const data = await fetchTvmazeShowWithEpisodes(title);
+      const remoteEpisodes = data?._embedded?.episodes || [];
+      if (!remoteEpisodes.length) continue;
+      const anime = isAnimeTitle(title);
+      title.externalId = String(data.id || title.externalId || "");
+      title.source = anime ? (title.source || "anime") : "tvmaze";
+      title.includeInCalendar = true;
+      title.episodes = mergeEpisodes(title.episodes || [], remoteEpisodes, data.averageRuntime || title.runtime || 45, {
+        useGenericRemoteNames: anime
+      });
+      const titleReleaseDates = title.episodes
+        .map((episode) => episode.airdate)
+        .filter((date) => parseIsoDate(date));
+      releaseCount += titleReleaseDates.length;
+      const upcomingRelease = titleReleaseDates
+        .filter((date) => date >= todayIso())
+        .sort((a, b) => a.localeCompare(b))[0];
+      if (upcomingRelease && (!nextReleaseDate || upcomingRelease < nextReleaseDate)) {
+        nextReleaseDate = upcomingRelease;
+      }
+      title.updatedAt = Date.now();
+      await saveTitle(sanitizeTitle(title));
+      updated += 1;
+    } catch {
+      continue;
+    }
+  }
+  await refresh();
+  if (nextReleaseDate) {
+    state.calendarDate = parseIsoDate(nextReleaseDate);
+    renderCalendar();
+  }
+  $("#notifyStatus").textContent = updated
+    ? `${updated} Serien aktualisiert, ${releaseCount} Release-Termine gefunden${nextReleaseDate ? `, nächster Termin: ${new Date(`${nextReleaseDate}T00:00:00`).toLocaleDateString("de-DE")}` : ", aber keine zukünftigen Termine"}.`
+    : "Keine neuen Release-Daten gefunden.";
+}
+
+function renderNotificationStatus() {
+  const status = $("#notifyStatus");
+  const button = $("#enableNotifyBtn");
+  if (!status || !button) return;
+  if (!("Notification" in window)) {
+    status.textContent = "Browser-Benachrichtigungen werden hier nicht unterstützt.";
+    button.disabled = true;
+    return;
+  }
+  status.textContent = Notification.permission === "granted"
+    ? "Browser-Benachrichtigungen sind aktiv, solange die App geöffnet ist."
+    : "In-App-Hinweise sind aktiv. Browser-Benachrichtigungen sind optional.";
+}
+
+function maybeSendCalendarNotifications(upcoming) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  const todaysEvents = upcoming.filter((event) => event.date === todayIso());
+  const notifyKey = `watch-up-notified-${todayIso()}`;
+  let sent = [];
+  try {
+    sent = JSON.parse(localStorage.getItem(notifyKey) || "[]");
+  } catch {
+    sent = [];
+  }
+  const nextSent = [...sent];
+  todaysEvents.forEach((event) => {
+    if (sent.includes(event.id)) return;
+    new Notification("Watch Up", { body: `${event.typeLabel}: ${event.label}` });
+    nextSent.push(event.id);
+  });
+  localStorage.setItem(notifyKey, JSON.stringify(nextSent));
 }
 
 function listItem(left, right) {
@@ -669,6 +1209,144 @@ function escapeHtml(value = "") {
   })[char]);
 }
 
+function stripHtml(value = "") {
+  const template = document.createElement("template");
+  template.innerHTML = String(value);
+  return template.content.textContent || "";
+}
+
+function safeText(value = "", maxLength = 5000) {
+  return stripHtml(value).replace(/\s+/g, " ").trim().slice(0, maxLength);
+}
+
+function safeImageUrl(value = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (raw.startsWith("data:image/")) return raw;
+  try {
+    const url = new URL(raw, window.location.href);
+    if (url.protocol === "https:" || url.protocol === "http:") return url.href;
+  } catch {
+    return "";
+  }
+  return "";
+}
+
+function getTmdbKey() {
+  return localStorage.getItem(TMDB_KEY) || "";
+}
+
+function setTmdbStatus() {
+  const input = $("#tmdbKeyInput");
+  const status = $("#tmdbKeyStatus");
+  if (!input || !status) return;
+  const hasKey = Boolean(getTmdbKey());
+  input.value = hasKey ? "••••••••••••••••" : "";
+  status.textContent = hasKey
+    ? "TMDb ist aktiv. Neue Suchen nutzen bessere Poster."
+    : "Kein TMDb-Key gespeichert.";
+}
+
+async function tmdbFetch(path, params = {}) {
+  const key = getTmdbKey();
+  if (!key) return null;
+  const url = new URL(`https://api.themoviedb.org/3${path}`);
+  Object.entries({
+    language: "de-DE",
+    include_adult: "false",
+    ...params
+  }).forEach(([name, value]) => {
+    if (value !== undefined && value !== null && value !== "") url.searchParams.set(name, value);
+  });
+
+  const options = key.startsWith("eyJ")
+    ? { headers: { Authorization: `Bearer ${key}` } }
+    : {};
+  if (!key.startsWith("eyJ")) url.searchParams.set("api_key", key);
+
+  try {
+    const response = await fetch(url, options);
+    if (!response.ok) return null;
+    return response.json();
+  } catch {
+    return null;
+  }
+}
+
+function tmdbPoster(path) {
+  return path ? `${TMDB_IMAGE_BASE}${path}` : "";
+}
+
+function tmdbToSuggestion(item) {
+  const type = item.media_type === "tv" ? "series" : "movie";
+  const title = type === "series" ? item.name : item.title;
+  const yearSource = type === "series" ? item.first_air_date : item.release_date;
+  return {
+    source: "tmdb",
+    id: String(item.id),
+    title: title || "",
+    image: tmdbPoster(item.poster_path),
+    poster: tmdbPoster(item.poster_path),
+    detail: `${type === "series" ? "Serie" : "Film"} · ${yearSource ? yearSource.slice(0, 4) : "ohne Jahr"} · TMDb`,
+    raw: {
+      tmdbId: item.id,
+      type,
+      title: title || "",
+      year: yearSource ? yearSource.slice(0, 4) : "",
+      description: item.overview || "",
+      poster: tmdbPoster(item.poster_path),
+      rating: item.vote_average ? `TMDb ${Number(item.vote_average).toFixed(1)}/10` : "",
+      popularity: item.popularity || 0
+    }
+  };
+}
+
+async function searchTmdbTitles(query, limit = 12) {
+  const data = await tmdbFetch("/search/multi", { query, page: 1 });
+  if (!data?.results) return [];
+  return data.results
+    .filter((item) => item.media_type === "movie" || item.media_type === "tv")
+    .map(tmdbToSuggestion)
+    .filter((item) => item.title)
+    .sort((a, b) => (b.raw.popularity || 0) - (a.raw.popularity || 0))
+    .slice(0, limit);
+}
+
+async function searchTmdbDiscover(seed, type = "movie") {
+  const query = seed.replace("science fiction", "sci-fi");
+  const results = await searchTmdbTitles(query, 10);
+  return results
+    .filter((item) => item.raw.type === type)
+    .map((item) => ({
+      id: `suggestion-tmdb-${item.raw.type}-${item.id}`,
+      source: "new",
+      type: item.raw.type,
+      title: item.title,
+      year: item.raw.year,
+      genres: [type === "movie" ? "Film" : "Serie"],
+      cast: [],
+      moods: [],
+      poster: item.poster,
+      description: item.raw.description,
+      externalRating: item.raw.rating,
+      reasons: [`TMDb-Vorschlag aus ${seed}`],
+      rawSuggestion: item.raw
+    }));
+}
+
+function titleSearchVariants(query) {
+  const normalized = query.trim().replace(/\s+/g, " ");
+  const variants = new Set([normalized]);
+  if (normalized.toLowerCase().includes("one piece") && /\bz\b/i.test(normalized)) {
+    variants.add("One Piece Film: Z");
+    variants.add("One Piece Film Z");
+  }
+  variants.add(`${normalized} film`);
+  variants.add(`${normalized} movie`);
+  variants.add(`${normalized} anime`);
+  return [...variants].filter(Boolean);
+}
+
 function resetForm() {
   $("#titleForm").reset();
   $("#editId").value = "";
@@ -681,6 +1359,7 @@ function resetForm() {
   $("#deleteBtn").style.visibility = "hidden";
   $("#dialogHeading").textContent = "Titel hinzufügen";
   $("#importNote").textContent = "";
+  $("#titleForm").dataset.tvmazeId = "";
   updateSeriesVisibility();
 }
 
@@ -705,6 +1384,7 @@ function openDialog(title = null) {
     $("#descriptionInput").value = title.description || "";
     $("#commentInput").value = title.comment || "";
     $("#deleteBtn").style.visibility = "visible";
+    $("#titleForm").dataset.tvmazeId = title.externalId || "";
     updateSeriesVisibility();
     renderEpisodeEditor(title.episodes || []);
     if (title.type === "series" && (title.episodes || []).some((episode, index) => isMissingEpisodeName(episode.name, episode.number || index + 1))) {
@@ -850,6 +1530,10 @@ async function enrichEpisodeNames(title, episodes) {
   const hasMissingNames = normalized.some((episode) => isMissingEpisodeName(episode.name, episode.number));
   if (!hasMissingNames) return normalized;
   const firstMissingNumber = normalized.find((episode) => isMissingEpisodeName(episode.name, episode.number))?.number || 1;
+  const anime = isAnimeTitle({
+    title,
+    genres: splitTags($("#genresInput")?.value || "")
+  });
 
   const [tvmazeEpisodes, kitsuEpisodes, jikanEpisodes] = await Promise.all([
     fetchTvmazeEpisodesByTitle(title).catch(() => []),
@@ -865,7 +1549,9 @@ async function enrichEpisodeNames(title, episodes) {
       : null;
     const kitsuMatch = kitsuEpisodes.find((candidate) => candidate.number === episode.number);
     const jikanMatch = jikanEpisodes.find((candidate) => candidate.number === episode.number);
-    const fallbackName = tvmazeMatch?.name || kitsuMatch?.name || jikanMatch?.name || `Episode ${episode.number || index + 1}`;
+    const fallbackName = anime
+      ? kitsuMatch?.name || jikanMatch?.name || tvmazeMatch?.name || `Episode ${episode.number || index + 1}`
+      : tvmazeMatch?.name || kitsuMatch?.name || jikanMatch?.name || `Episode ${episode.number || index + 1}`;
     return {
       ...episode,
       name: fallbackName,
@@ -949,10 +1635,78 @@ function collectEpisodes() {
   return normalizeEpisodesForEditor(formEpisodes);
 }
 
+function sanitizeEpisode(episode = {}, index = 0) {
+  const number = Number.isFinite(Number(episode.number)) ? Number(episode.number) : index + 1;
+  return {
+    id: safeText(episode.id || crypto.randomUUID(), 120),
+    season: Number.isFinite(Number(episode.season)) ? Number(episode.season) : 1,
+    number,
+    name: safeText(episode.name || `Episode ${number}`, 300),
+    runtime: Number(episode.runtime) || null,
+    airdate: safeText(episode.airdate || "", 30),
+    plannedAt: safeText(episode.plannedAt || "", 30),
+    seen: Boolean(episode.seen),
+    rating: normalizeRating(episode.rating),
+    watchedAt: safeText(episode.watchedAt || "", 30),
+    comment: safeText(episode.comment || "", 1000)
+  };
+}
+
+function sanitizeTitle(title = {}) {
+  const type = title.type === "series" ? "series" : "movie";
+  const status = statuses.includes(title.status) ? title.status : statuses[0];
+  return {
+    id: safeText(title.id || crypto.randomUUID(), 120),
+    title: safeText(title.title || "", 300),
+    type,
+    status,
+    year: safeText(title.year || "", 20),
+    runtime: Number(title.runtime) || null,
+    rating: normalizeRating(title.rating),
+    watchedAt: safeText(title.watchedAt || "", 30),
+    rewatchCount: Math.max(0, Number(title.rewatchCount || 0)),
+    genres: (title.genres || []).map((tag) => safeText(tag, 80)).filter(Boolean).slice(0, 30),
+    cast: (title.cast || []).map((person) => safeText(person, 120)).filter(Boolean).slice(0, 60),
+    moods: (title.moods || []).map((mood) => safeText(mood, 80)).filter(Boolean).slice(0, 30),
+    externalRating: safeText(title.externalRating || "", 120),
+    externalId: safeText(title.externalId || "", 80),
+    source: safeText(title.source || "", 60),
+    includeInCalendar: Boolean(title.includeInCalendar),
+    poster: safeImageUrl(title.poster),
+    plannedAt: safeText(title.plannedAt || "", 30),
+    releaseDate: safeText(title.releaseDate || "", 30),
+    description: safeText(title.description || "", 5000),
+    comment: safeText(title.comment || "", 3000),
+    episodes: type === "series" ? (title.episodes || []).map(sanitizeEpisode).slice(0, 5000) : [],
+    createdAt: Number(title.createdAt) || Date.now(),
+    updatedAt: Number(title.updatedAt) || Date.now()
+  };
+}
+
+function sanitizeSuggestion(suggestion = {}) {
+  return {
+    id: safeText(suggestion.id || crypto.randomUUID(), 160),
+    source: safeText(suggestion.source || "new", 60),
+    type: suggestion.type === "series" ? "series" : "movie",
+    title: safeText(suggestion.title || "", 300),
+    year: safeText(suggestion.year || "", 20),
+    genres: (suggestion.genres || []).map((tag) => safeText(tag, 80)).filter(Boolean).slice(0, 30),
+    cast: (suggestion.cast || []).map((person) => safeText(person, 120)).filter(Boolean).slice(0, 60),
+    moods: (suggestion.moods || []).map((mood) => safeText(mood, 80)).filter(Boolean).slice(0, 30),
+    externalRating: safeText(suggestion.externalRating || "", 120),
+    poster: safeImageUrl(suggestion.poster),
+    description: safeText(suggestion.description || "", 5000),
+    reasons: (suggestion.reasons || []).map((reason) => safeText(reason, 160)).filter(Boolean).slice(0, 6),
+    decision: safeText(suggestion.decision || "", 40),
+    createdAt: Number(suggestion.createdAt) || Date.now(),
+    updatedAt: Number(suggestion.updatedAt) || Date.now()
+  };
+}
+
 function renderTitleSuggestions(results) {
   $("#titleSuggestions").innerHTML = results.map((item) => `
     <button type="button" class="suggestion" data-source="${item.source}" data-id="${item.id}">
-      <span class="suggestion-poster">${item.image ? `<img src="${item.image}" alt="">` : ""}</span>
+      <span class="suggestion-poster">${safeImageUrl(item.image) ? `<img src="${escapeHtml(safeImageUrl(item.image))}" alt="" referrerpolicy="no-referrer">` : ""}</span>
       <span>
         <strong>${escapeHtml(item.title)}</strong>
         <small>${escapeHtml(item.detail)}</small>
@@ -961,15 +1715,93 @@ function renderTitleSuggestions(results) {
   `).join("");
 }
 
+function commonsImageUrl(fileName, width = 600) {
+  if (!fileName) return "";
+  return `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(fileName)}?width=${width}`;
+}
+
+function claimValue(entity, property) {
+  return entity?.claims?.[property]?.[0]?.mainsnak?.datavalue?.value || null;
+}
+
+async function enrichWikidataMovies(movies) {
+  if (!movies.length) return movies;
+  const ids = movies.map((movie) => movie.id).filter(Boolean).join("|");
+  if (!ids) return movies;
+
+  try {
+    const response = await fetch(`https://www.wikidata.org/w/api.php?action=wbgetentities&ids=${encodeURIComponent(ids)}&props=claims|descriptions&languages=de|en&format=json&origin=*`);
+    if (!response.ok) return movies;
+    const data = await response.json();
+    return movies.map((movie) => {
+      const entity = data.entities?.[movie.id];
+      const imageName = claimValue(entity, "P18");
+      const publicationDate = claimValue(entity, "P577")?.time || claimValue(entity, "P571")?.time || "";
+      const year = publicationDate.match(/\b(19|20)\d{2}\b/)?.[0] || movie.raw.year || movie.year || "";
+      const description = entity?.descriptions?.de?.value || entity?.descriptions?.en?.value || movie.raw.description || "";
+      const image = commonsImageUrl(imageName);
+      return {
+        ...movie,
+        image: image || movie.image || "",
+        poster: image || movie.poster || "",
+        detail: `Film · ${year || "ohne Jahr"} · ${description || movie.raw.description || ""}`,
+        raw: {
+          ...movie.raw,
+          year,
+          description,
+          poster: image || movie.raw.poster || "",
+          image: image || movie.raw.image || ""
+        }
+      };
+    });
+  } catch {
+    return movies;
+  }
+}
+
+async function fetchWikipediaDetails(title, type = "") {
+  const deVariants = [
+    title,
+    type === "series" ? `${title} (Fernsehserie)` : "",
+    type === "movie" ? `${title} (Film)` : ""
+  ].filter(Boolean);
+  const enVariants = [
+    title,
+    type === "series" ? `${title} (TV series)` : "",
+    type === "movie" ? `${title} (film)` : ""
+  ].filter(Boolean);
+
+  let germanExtract = "";
+  for (const [language, variants] of [["de", deVariants], ["en", enVariants]]) {
+    for (const variant of variants) {
+      try {
+        const response = await fetch(`https://${language}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(variant)}`);
+        if (!response.ok) continue;
+        const data = await response.json();
+        if (data.type === "disambiguation") continue;
+        const image = data.originalimage?.source || data.thumbnail?.source || "";
+        if (language === "de" && data.extract && !germanExtract) germanExtract = data.extract;
+        if (image) return { extract: germanExtract, image };
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  return { extract: germanExtract, image: "" };
+}
+
 async function searchWikidataMovies(query) {
-  const searches = [query, `${query} film`, `${query} movie`];
-  const responses = await Promise.all(searches.map((term) =>
+  const searches = titleSearchVariants(query);
+  const responses = await Promise.allSettled(searches.map((term) =>
     fetch(`https://www.wikidata.org/w/api.php?action=wbsearchentities&search=${encodeURIComponent(term)}&language=de&format=json&limit=12&origin=*`)
   ));
 
   const seen = new Set();
   const movies = [];
-  for (const response of responses) {
+  for (const resultResponse of responses) {
+    if (resultResponse.status !== "fulfilled") continue;
+    const response = resultResponse.value;
     if (!response.ok) continue;
     const data = await response.json();
     for (const result of data.search || []) {
@@ -987,6 +1819,7 @@ async function searchWikidataMovies(query) {
         id: result.id,
         title: label,
         image: "",
+        poster: "",
         detail: `Film · ${year} · ${description}`,
         raw: {
           title: label,
@@ -998,22 +1831,53 @@ async function searchWikidataMovies(query) {
       });
     }
   }
-  return movies.slice(0, 12);
+  return enrichWikidataMovies(movies.slice(0, 12));
+}
+
+async function searchJikanAnimeTitles(query) {
+  try {
+    const results = [];
+    const seen = new Set();
+    for (const term of titleSearchVariants(query).slice(0, 4)) {
+      const response = await fetch(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(term)}&limit=8`);
+      if (!response.ok) continue;
+      const data = await response.json();
+      (data.data || []).forEach((anime) => {
+        const title = anime.title_english || anime.title || anime.title_japanese || "";
+        const key = `${anime.mal_id}`;
+        if (!title || seen.has(key)) return;
+        seen.add(key);
+        const type = anime.type === "Movie" ? "movie" : "series";
+        results.push({
+          source: "jikan",
+          id: String(anime.mal_id),
+          title,
+          image: anime.images?.jpg?.large_image_url || anime.images?.jpg?.image_url || "",
+          poster: anime.images?.jpg?.large_image_url || anime.images?.jpg?.image_url || "",
+          detail: `${type === "movie" ? "Anime-Film" : "Anime-Serie"} · ${anime.year || anime.aired?.from?.slice(0, 4) || "ohne Jahr"} · MyAnimeList`,
+          raw: {
+            malId: anime.mal_id,
+            type,
+            title,
+            year: anime.year || anime.aired?.from?.slice(0, 4) || "",
+            description: anime.synopsis || "",
+            poster: anime.images?.jpg?.large_image_url || anime.images?.jpg?.image_url || "",
+            rating: anime.score ? `MAL ${Number(anime.score).toFixed(1)}/10` : "",
+            genres: (anime.genres || []).map((genre) => genre.name),
+            episodes: anime.episodes || null
+          }
+        });
+      });
+    }
+    return results.slice(0, 10);
+  } catch {
+    return [];
+  }
 }
 
 async function fetchGermanSummary(title) {
-  const variants = [title, `${title} (Fernsehserie)`, `${title} (Film)`];
-  for (const variant of variants) {
-    try {
-      const response = await fetch(`https://de.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(variant)}`);
-      if (!response.ok) continue;
-      const data = await response.json();
-      if (data.extract && data.type !== "disambiguation") return data.extract;
-    } catch {
-      continue;
-    }
-  }
-  return "";
+  const details = await fetchWikipediaDetails(title);
+  return details.extract;
 }
 
 async function searchTitleSuggestions() {
@@ -1030,8 +1894,10 @@ async function searchTitleSuggestions() {
   $("#titleSearchNote").textContent = "Suche läuft...";
 
   try {
-    const [seriesResponse, movieResults] = await Promise.allSettled([
+    const [tmdbResults, seriesResponse, animeResults, movieResults] = await Promise.allSettled([
+      searchTmdbTitles(query),
       fetch(`https://api.tvmaze.com/search/shows?q=${encodeURIComponent(query)}`),
+      searchJikanAnimeTitles(query),
       searchWikidataMovies(query)
     ]);
 
@@ -1053,11 +1919,18 @@ async function searchTitleSuggestions() {
     const movies = movieResults.status === "fulfilled"
       ? movieResults.value
       : [];
+    const tmdb = tmdbResults.status === "fulfilled"
+      ? tmdbResults.value
+      : [];
+    const anime = animeResults.status === "fulfilled"
+      ? animeResults.value
+      : [];
 
     if (run !== titleSearchRun) return;
 
     titleSuggestionCache.clear();
-    const mixed = [...series.slice(0, 8), ...movies.slice(0, 12)].slice(0, 16);
+    const mixed = dedupeMedia([...tmdb.slice(0, 8), ...anime.slice(0, 8), ...series.slice(0, 8), ...movies.slice(0, 12)])
+      .slice(0, 16);
     mixed.forEach((item) => titleSuggestionCache.set(`${item.source}:${item.id}`, item));
 
     if (!mixed.length) throw new Error("Keine Treffer");
@@ -1088,7 +1961,8 @@ function showSeriesSuggestions(results) {
     const genres = (show.genres || []).join(", ") || "keine Genres";
     const network = show.network?.name || show.webChannel?.name || "unbekannte Quelle";
     const format = [show.type, show.language].filter(Boolean).join(" · ") || "Serie";
-    const image = show.image?.medium ? `<img src="${show.image.medium}" alt="">` : "";
+    const safeImage = safeImageUrl(show.image?.medium);
+    const image = safeImage ? `<img src="${escapeHtml(safeImage)}" alt="" referrerpolicy="no-referrer">` : "";
     return `
       <button type="button" class="suggestion" data-show-id="${show.id}">
         <span class="suggestion-poster">${image}</span>
@@ -1145,12 +2019,13 @@ async function importSelectedSeries(showId) {
     }));
     const enrichedEpisodes = await enrichEpisodeNames(data.name, episodes);
     $("#titleInput").value = data.name || $("#titleInput").value;
+    $("#titleForm").dataset.tvmazeId = String(data.id || showId);
     $("#yearInput").value = data.premiered ? data.premiered.slice(0, 4) : $("#yearInput").value;
     $("#runtimeInput").value = data.averageRuntime || data.runtime || $("#runtimeInput").value;
     $("#genresInput").value = (data.genres || []).join(", ") || $("#genresInput").value;
-    const germanSummary = await fetchGermanSummary(data.name);
-    $("#descriptionInput").value = germanSummary || (data.summary || "").replace(/<[^>]+>/g, "") || $("#descriptionInput").value;
-    $("#posterInput").value = data.image?.original || data.image?.medium || $("#posterInput").value;
+    const wikiDetails = await fetchWikipediaDetails(data.name, "series");
+    $("#descriptionInput").value = safeText(wikiDetails.extract || data.summary || $("#descriptionInput").value);
+    $("#posterInput").value = safeImageUrl(data.image?.original || data.image?.medium || wikiDetails.image || $("#posterInput").value);
     renderEpisodeEditor(enrichedEpisodes);
     $("#seriesSuggestions").innerHTML = "";
     $("#importNote").textContent = `${enrichedEpisodes.length} Episoden aus "${data.name}" importiert.`;
@@ -1187,17 +2062,56 @@ async function enrichCurrentEpisodes() {
 }
 
 async function importSelectedMovie(movie) {
-  const germanSummary = await fetchGermanSummary(movie.title);
+  const wikiDetails = await fetchWikipediaDetails(movie.title, "movie");
   $("#typeInput").value = "movie";
   updateSeriesVisibility();
   $("#titleInput").value = movie.title || $("#titleInput").value;
   $("#yearInput").value = movie.year !== "ohne Jahr" ? movie.year : $("#yearInput").value;
   $("#genresInput").value = $("#genresInput").value || "Film";
-  $("#descriptionInput").value = germanSummary || movie.description || $("#descriptionInput").value;
+  $("#descriptionInput").value = safeText(wikiDetails.extract || movie.description || $("#descriptionInput").value);
+  $("#posterInput").value = safeImageUrl(movie.poster || movie.image || wikiDetails.image || $("#posterInput").value);
   $("#externalRatingInput").value = movie.wikidataId ? `Wikidata: ${movie.wikidataId}` : $("#externalRatingInput").value;
   $("#episodeEditor").innerHTML = "";
   $("#titleSuggestions").innerHTML = "";
   $("#titleSearchNote").textContent = `"${movie.title}" übernommen.`;
+}
+
+async function importSelectedTmdb(item) {
+  const movie = item.raw;
+  $("#typeInput").value = movie.type;
+  updateSeriesVisibility();
+  $("#titleInput").value = movie.title || $("#titleInput").value;
+  $("#yearInput").value = movie.year || $("#yearInput").value;
+  $("#descriptionInput").value = safeText(movie.description || $("#descriptionInput").value);
+  $("#posterInput").value = safeImageUrl(movie.poster || $("#posterInput").value);
+  $("#externalRatingInput").value = movie.rating || $("#externalRatingInput").value;
+  $("#genresInput").value = $("#genresInput").value || (movie.type === "series" ? "Serie" : "Film");
+  if (movie.type === "movie") {
+    $("#episodeEditor").innerHTML = "";
+  } else {
+    $("#importNote").textContent = "Für Episoden bitte zusätzlich Serienvorschläge suchen und passenden TVmaze-Titel auswählen.";
+  }
+  $("#titleSuggestions").innerHTML = "";
+  $("#titleSearchNote").textContent = `"${movie.title}" übernommen.`;
+}
+
+async function importSelectedJikan(item) {
+  const anime = item.raw;
+  $("#typeInput").value = anime.type;
+  updateSeriesVisibility();
+  $("#titleInput").value = anime.title || $("#titleInput").value;
+  $("#yearInput").value = anime.year || $("#yearInput").value;
+  $("#descriptionInput").value = safeText(anime.description || $("#descriptionInput").value);
+  $("#posterInput").value = safeImageUrl(anime.poster || $("#posterInput").value);
+  $("#externalRatingInput").value = anime.rating || $("#externalRatingInput").value;
+  $("#genresInput").value = formatTags(["Anime", ...(anime.genres || [])]);
+  if (anime.type === "movie") {
+    $("#episodeEditor").innerHTML = "";
+  } else {
+    $("#importNote").textContent = "Für vollständige Episoden bitte zusätzlich Serienvorschläge suchen oder Episodennamen ergänzen.";
+  }
+  $("#titleSuggestions").innerHTML = "";
+  $("#titleSearchNote").textContent = `"${anime.title}" übernommen.`;
 }
 
 async function importSelectedTitle(source, id) {
@@ -1214,6 +2128,14 @@ async function importSelectedTitle(source, id) {
 
   if (source === "wikidata") {
     await importSelectedMovie(item.raw);
+  }
+
+  if (source === "tmdb") {
+    await importSelectedTmdb(item);
+  }
+
+  if (source === "jikan") {
+    await importSelectedJikan(item);
   }
 }
 
@@ -1236,14 +2158,24 @@ async function handleSubmit(event) {
     cast: splitTags($("#castInput").value),
     moods: splitTags($("#moodsInput").value),
     externalRating: $("#externalRatingInput").value.trim(),
+    externalId: existing?.externalId || $("#titleForm").dataset.tvmazeId || "",
+    source: existing?.source || ($("#titleForm").dataset.tvmazeId ? "tvmaze" : ""),
     poster: $("#posterInput").value.trim(),
     description: $("#descriptionInput").value.trim(),
     comment: $("#commentInput").value.trim(),
     episodes: $("#typeInput").value === "series" ? collectEpisodes(existing?.episodes || []) : [],
     createdAt: existing?.createdAt || now,
-    updatedAt: now
+    updatedAt: now,
+    plannedAt: existing?.plannedAt || "",
+    releaseDate: existing?.releaseDate || ""
   };
-  await saveTitle(title);
+  const cleanTitle = sanitizeTitle(title);
+  const duplicate = state.titles.find((item) => item.id !== id && isSameMedia(item, cleanTitle));
+  if (duplicate) {
+    alert(`"${duplicate.title}" ist schon in deiner Sammlung.`);
+    return;
+  }
+  await saveTitle(cleanTitle);
   $("#titleDialog").close();
   await refresh();
 }
@@ -1283,13 +2215,15 @@ async function applySwipeAction(action) {
 
   if (action === "maybe") {
     if (current.source === "new") {
-      await saveSuggestion({
-        ...current,
-        id: current.id,
-        decision: "Vielleicht",
-        createdAt: current.createdAt || Date.now(),
-        updatedAt: Date.now()
-      });
+      if (!hasMediaInList([...state.titles, ...state.savedSuggestions], current)) {
+        await saveSuggestion(sanitizeSuggestion({
+          ...current,
+          id: current.id,
+          decision: "Vielleicht",
+          createdAt: current.createdAt || Date.now(),
+          updatedAt: Date.now()
+        }));
+      }
       state.newSuggestions = state.newSuggestions.filter((item) => item.id !== current.id);
     } else {
       const title = state.titles.find((item) => item.id === current.id);
@@ -1306,13 +2240,15 @@ async function applySwipeAction(action) {
 
   if (action === "yes") {
     if (current.source === "new") {
-      await saveSuggestion({
-        ...current,
-        id: current.id,
-        decision: "Ja",
-        createdAt: current.createdAt || Date.now(),
-        updatedAt: Date.now()
-      });
+      if (!hasMediaInList([...state.titles, ...state.savedSuggestions], current)) {
+        await saveSuggestion(sanitizeSuggestion({
+          ...current,
+          id: current.id,
+          decision: "Ja",
+          createdAt: current.createdAt || Date.now(),
+          updatedAt: Date.now()
+        }));
+      }
       state.newSuggestions = state.newSuggestions.filter((item) => item.id !== current.id);
     } else {
       const title = state.titles.find((item) => item.id === current.id);
@@ -1330,7 +2266,14 @@ async function applySwipeAction(action) {
 async function addSavedSuggestionToLibrary(id) {
   const suggestion = state.savedSuggestions.find((item) => item.id === id);
   if (!suggestion) return;
-  await saveTitle({
+  const duplicate = state.titles.find((title) => isSameMedia(title, suggestion));
+  if (duplicate) {
+    alert(`"${duplicate.title}" ist schon in deiner Sammlung.`);
+    await deleteSuggestion(id);
+    await refresh();
+    return;
+  }
+  await saveTitle(sanitizeTitle({
     id: crypto.randomUUID(),
     title: suggestion.title,
     type: suggestion.type,
@@ -1343,14 +2286,14 @@ async function addSavedSuggestionToLibrary(id) {
     genres: suggestion.genres || [],
     cast: suggestion.cast || [],
     moods: suggestion.moods || [],
-    externalRating: "",
+    externalRating: suggestion.externalRating || "",
     poster: suggestion.poster || "",
     description: suggestion.description || "",
     comment: `Aus Swipe-Auswahl übernommen: ${(suggestion.reasons || []).join(", ")}`,
     episodes: [],
     createdAt: Date.now(),
     updatedAt: Date.now()
-  });
+  }));
   await deleteSuggestion(id);
   await refresh();
 }
@@ -1366,6 +2309,7 @@ function exportData() {
 }
 
 async function importData(file) {
+  if (file.size > 5 * 1024 * 1024) throw new Error("Backup zu groß");
   const text = await file.text();
   const data = JSON.parse(text);
   if (!Array.isArray(data.titles)) throw new Error("Ungültiges Backup");
@@ -1379,10 +2323,12 @@ async function importData(file) {
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
   });
-  for (const title of data.titles) {
+  const cleanTitles = dedupeMedia(data.titles.map(sanitizeTitle).filter((title) => title.title));
+  const cleanSuggestions = dedupeMedia((data.suggestions || []).map(sanitizeSuggestion).filter((suggestion) => suggestion.title));
+  for (const title of cleanTitles) {
     await saveTitle(title);
   }
-  for (const suggestion of data.suggestions || []) {
+  for (const suggestion of cleanSuggestions) {
     await saveSuggestion(suggestion);
   }
   await refresh();
@@ -1411,7 +2357,7 @@ function bindEvents() {
   $("#deleteBtn").addEventListener("click", async () => {
     const id = $("#editId").value;
     if (!id || !confirm("Diesen Titel wirklich löschen?")) return;
-    await deleteTitle(id);
+    await deleteTitleEverywhere(id);
     $("#titleDialog").close();
     await refresh();
   });
@@ -1519,6 +2465,63 @@ function bindEvents() {
       alert("Import fehlgeschlagen.");
     }
   });
+  $("#prevMonthBtn").addEventListener("click", () => {
+    state.calendarDate = new Date(state.calendarDate.getFullYear(), state.calendarDate.getMonth() - 1, 1);
+    renderCalendar();
+  });
+  $("#nextMonthBtn").addEventListener("click", () => {
+    state.calendarDate = new Date(state.calendarDate.getFullYear(), state.calendarDate.getMonth() + 1, 1);
+    renderCalendar();
+  });
+  $("#todayMonthBtn").addEventListener("click", () => {
+    state.calendarDate = new Date();
+    renderCalendar();
+  });
+  $("#calendarGrid").addEventListener("click", (event) => {
+    const day = event.target.closest("[data-calendar-date]");
+    if (!day) return;
+    $("#planDateInput").value = day.dataset.calendarDate;
+    $("#calendarPlanPanel").classList.add("pulse");
+    $("#calendarPlanPanel").scrollIntoView({ behavior: "smooth", block: "center" });
+    window.setTimeout(() => $("#calendarPlanPanel").classList.remove("pulse"), 900);
+  });
+  $("#planTitleSelect").addEventListener("change", () => {
+    $("#planDateInput").value = "";
+    renderPlanControls();
+  });
+  $("#planEpisodeSelect").addEventListener("change", () => {
+    $("#planDateInput").value = "";
+    renderPlanControls();
+  });
+  $("#savePlanBtn").addEventListener("click", savePlannedWatch);
+  $("#clearPlanBtn").addEventListener("click", clearPlannedWatch);
+  $("#addToCalendarBtn").addEventListener("click", addTitleToCalendar);
+  $("#calendarIncludedList").addEventListener("click", async (event) => {
+    const remove = event.target.closest("[data-calendar-remove]");
+    if (!remove) return;
+    await removeTitleFromCalendar(remove.dataset.calendarRemove);
+  });
+  $("#refreshCalendarBtn").addEventListener("click", refreshReleaseDates);
+  $("#enableNotifyBtn").addEventListener("click", async () => {
+    if (!("Notification" in window)) return;
+    await Notification.requestPermission();
+    renderNotificationStatus();
+    renderCalendar();
+  });
+  $("#saveTmdbKeyBtn").addEventListener("click", () => {
+    const value = $("#tmdbKeyInput").value.trim();
+    if (!value || value.includes("•")) {
+      setTmdbStatus();
+      return;
+    }
+    localStorage.setItem(TMDB_KEY, value);
+    setTmdbStatus();
+  });
+  $("#clearTmdbKeyBtn").addEventListener("click", () => {
+    localStorage.removeItem(TMDB_KEY);
+    setTmdbStatus();
+  });
+  setTmdbStatus();
 }
 
 async function seedIfEmpty() {

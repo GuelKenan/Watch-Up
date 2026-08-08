@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' https://api.tvmaze.com https://www.wikidata.org https://de.wikipedia.org https://en.wikipedia.org https://api.jikan.moe https://kitsu.io https://itunes.apple.com https://api.themoviedb.org; img-src 'self' https: data:; object-src 'none'; base-uri 'none'; form-action 'self'" />
     <title>Watch Up</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
@@ -24,10 +25,18 @@
           <button data-view="backup">Backup</button>
         </nav>
         <section class="level-card">
-          <span>Watch Level</span>
-          <strong id="watchLevel">Gelegenheitsgucker</strong>
-          <div class="meter"><i id="levelMeter"></i></div>
-          <small id="levelHint">0 Minuten getrackt</small>
+          <div class="level-block">
+            <span>Film-Level</span>
+            <strong id="movieWatchLevel">Film-Starter</strong>
+            <div class="meter"><i id="movieLevelMeter"></i></div>
+            <small id="movieLevelHint">0 Film-Minuten</small>
+          </div>
+          <div class="level-block">
+            <span>Serien-Level</span>
+            <strong id="seriesWatchLevel">Serien-Starter</strong>
+            <div class="meter"><i id="seriesLevelMeter"></i></div>
+            <small id="seriesLevelHint">0 Serien-Minuten</small>
+          </div>
         </section>
       </aside>
 
@@ -137,9 +146,56 @@
         </section>
 
         <section class="view" id="calendarView">
+          <div class="calendar-toolbar">
+            <button class="secondary" id="prevMonthBtn" type="button">Zurück</button>
+            <div>
+              <h3 id="calendarMonthTitle">Kalender</h3>
+              <p class="muted" id="calendarMonthHint">Plane Filme und Folgen.</p>
+            </div>
+            <button class="secondary" id="todayMonthBtn" type="button">Heute</button>
+            <button class="secondary" id="nextMonthBtn" type="button">Weiter</button>
+          </div>
+          <div class="calendar-layout">
+            <section class="panel calendar-panel">
+              <div class="calendar-weekdays" aria-hidden="true">
+                <span>Mo</span><span>Di</span><span>Mi</span><span>Do</span><span>Fr</span><span>Sa</span><span>So</span>
+              </div>
+              <div class="calendar-grid" id="calendarGrid"></div>
+            </section>
+            <section class="panel">
+              <h3>Heute & diese Woche</h3>
+              <div class="list" id="calendarList"></div>
+              <button class="secondary full-width" id="refreshCalendarBtn" type="button">Release-Daten aktualisieren</button>
+              <button class="secondary full-width" id="enableNotifyBtn" type="button">Benachrichtigungen erlauben</button>
+              <p class="muted" id="notifyStatus">In-App-Hinweise sind aktiv.</p>
+            </section>
+          </div>
+          <section class="panel" id="calendarPlanPanel">
+            <h3>Watch-Termin planen</h3>
+            <div class="plan-grid">
+              <label>Titel
+                <select id="planTitleSelect"></select>
+              </label>
+              <label>Film / Folge
+                <select id="planEpisodeSelect"></select>
+              </label>
+              <label>Datum
+                <input id="planDateInput" type="date" />
+              </label>
+              <button class="primary" id="savePlanBtn" type="button">Planen</button>
+              <button class="danger" id="clearPlanBtn" type="button">Plan löschen</button>
+            </div>
+          </section>
           <section class="panel">
-            <h3>Nächste Episoden</h3>
-            <div class="list" id="calendarList"></div>
+            <h3>Kalender-Auswahl</h3>
+            <p class="muted">Wähle aus, welche Titel im Kalender erscheinen sollen.</p>
+            <div class="calendar-pick-grid">
+              <label>Titel hinzufügen
+                <select id="calendarAddSelect"></select>
+              </label>
+              <button class="secondary" id="addToCalendarBtn" type="button">Hinzufügen</button>
+            </div>
+            <div class="list" id="calendarIncludedList"></div>
           </section>
         </section>
 
@@ -159,6 +215,18 @@
               </label>
             </section>
           </div>
+          <section class="panel settings-panel">
+            <h3>API-Einstellungen</h3>
+            <p>Optional: Ein eigener TMDb API-Key verbessert Film- und Serienposter. Der Key bleibt nur lokal in diesem Browser und wird nicht im Backup gespeichert.</p>
+            <div class="settings-row">
+              <label>TMDb API-Key
+                <input id="tmdbKeyInput" type="password" autocomplete="off" placeholder="Hier eigenen TMDb-Key eintragen" />
+              </label>
+              <button class="secondary" id="saveTmdbKeyBtn" type="button">Speichern</button>
+              <button class="danger" id="clearTmdbKeyBtn" type="button">Entfernen</button>
+            </div>
+            <p class="muted" id="tmdbKeyStatus">Kein TMDb-Key gespeichert.</p>
+          </section>
         </section>
       </main>
     </div>
